@@ -1,5 +1,4 @@
 
-
 name: Build Customs OCR Windows 10 Portable
 
 on:
@@ -10,7 +9,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
 
       - name: Setup Python 3.12
@@ -20,14 +19,16 @@ jobs:
           architecture: 'x64'
 
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-build.txt
-          pip install pyinstaller
+          python -m pip install -r requirements-build.txt
+          python -m pip install pyinstaller
 
-      - name: Build CustomsOCR.exe
+      - name: Build Windows Portable EXE
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --name CustomsOCR --collect-all streamlit --collect-all fitz --collect-all openpyxl --collect-all pandas --collect-all pytesseract launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --console --name CustomsOCR --collect-all streamlit --copy-metadata streamlit --collect-all fitz --collect-all openpyxl --collect-all pandas --collect-all pytesseract launcher.py
 
       - name: Copy application files
         shell: pwsh
@@ -36,7 +37,18 @@ jobs:
           Copy-Item Customs_Import_OCR_Template.xlsx dist/CustomsOCR/
           Copy-Item sample.pdf dist/CustomsOCR/
 
-      - name: Upload Portable ZIP
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/CustomsOCR/CustomsOCR.exe")) {
+            throw "CustomsOCR.exe not found"
+          }
+          if (!(Test-Path "dist/CustomsOCR/app.py")) {
+            throw "app.py not found"
+          }
+          Write-Host "Build files verified"
+
+      - name: Upload Portable Application
         uses: actions/upload-artifact@v4
         with:
           name: CustomsOCR_Win10_Portable
