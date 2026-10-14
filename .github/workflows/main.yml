@@ -1,56 +1,33 @@
-
-name: Build Customs OCR Windows 10 Portable
-
+name: Build Customs OCR Windows Portable
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           architecture: 'x64'
-
-      - name: Install dependencies
+      - name: Install
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-build.txt
-          python -m pip install pyinstaller
-
-      - name: Build Windows Portable EXE
+          python -m pip install streamlit==1.40.2 PyMuPDF==1.24.14 openpyxl==3.1.5 pytesseract==0.3.13 Pillow==11.0.0 pyinstaller==6.11.1
+      - name: Build
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --console --name CustomsOCR --collect-all streamlit --copy-metadata streamlit --collect-all fitz --collect-all openpyxl --collect-all pandas --collect-all pytesseract launcher.py
-
-      - name: Copy application files
+          python -m PyInstaller --noconfirm --clean --onedir --console --name CustomsOCR --collect-all streamlit --copy-metadata streamlit --collect-all fitz --collect-all openpyxl --collect-all pytesseract --hidden-import PIL launcher.py
+      - name: Copy files
         shell: pwsh
         run: |
-          Copy-Item app.py dist/CustomsOCR/
-          Copy-Item Customs_Import_OCR_Template.xlsx dist/CustomsOCR/
-          Copy-Item sample.pdf dist/CustomsOCR/
-
-      - name: Verify build output
-        shell: pwsh
-        run: |
-          if (!(Test-Path "dist/CustomsOCR/CustomsOCR.exe")) {
-            throw "CustomsOCR.exe not found"
-          }
-          if (!(Test-Path "dist/CustomsOCR/app.py")) {
-            throw "app.py not found"
-          }
-          Write-Host "Build files verified"
-
-      - name: Upload Portable Application
-        uses: actions/upload-artifact@v4
+          Copy-Item app.py dist/CustomsOCR/app.py
+          Copy-Item Customs_Import_OCR_Template.xlsx dist/CustomsOCR/Customs_Import_OCR_Template.xlsx
+          if (Test-Path sample.pdf) { Copy-Item sample.pdf dist/CustomsOCR/sample.pdf }
+          if (!(Test-Path dist/CustomsOCR/CustomsOCR.exe)) { throw 'Missing EXE' }
+      - uses: actions/upload-artifact@v4
         with:
-          name: CustomsOCR_Win10_Portable
+          name: CustomsOCR_Win10_Portable_Fix
           path: dist/CustomsOCR/
           retention-days: 30
