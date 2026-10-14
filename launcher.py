@@ -1,19 +1,27 @@
-import os,sys,threading,time,webbrowser
+import os
+import sys
 from pathlib import Path
 
 def main():
-    base=Path(getattr(sys,'_MEIPASS',Path(__file__).parent))
-    app=base/'app.py'
-    os.environ['CUSTOMS_OCR_BASE']=str(base)
-    tess=Path(sys.executable).parent/'tesseract'/'tesseract.exe'
-    if tess.exists():
-        os.environ['TESSERACT_CMD']=str(tess)
-        os.environ['TESSDATA_PREFIX']=str(tess.parent/'tessdata')
-    sys.argv=['streamlit','run',str(app),'--server.address=127.0.0.1','--server.port=8501','--server.headless=true','--browser.gatherUsageStats=false']
-    def open_browser():
-        time.sleep(3)
-        webbrowser.open('http://127.0.0.1:8501')
-    threading.Thread(target=open_browser,daemon=True).start()
-    from streamlit.web.cli import main as cli_main
-    cli_main()
-if __name__=='__main__':main()
+    from streamlit.web import cli as stcli
+
+    base_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    app_path = base_dir / "app.py"
+
+    os.environ["STREAMLIT_GLOBAL_DEVELOPMENT_MODE"] = "false"
+
+    sys.argv = [
+        "streamlit",
+        "run",
+        str(app_path),
+        "--global.developmentMode=false",
+        "--server.port=8501",
+        "--server.address=127.0.0.1",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false",
+    ]
+
+    sys.exit(stcli.main())
+
+if __name__ == "__main__":
+    main()
