@@ -1,1 +1,44 @@
 
+
+name: Build Customs OCR Windows 10 Portable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+          pip install pyinstaller
+
+      - name: Build CustomsOCR.exe
+        run: |
+          pyinstaller --noconfirm --clean --onedir --name CustomsOCR --collect-all streamlit --collect-all fitz --collect-all openpyxl --collect-all pandas --collect-all pytesseract launcher.py
+
+      - name: Copy application files
+        shell: pwsh
+        run: |
+          Copy-Item app.py dist/CustomsOCR/
+          Copy-Item Customs_Import_OCR_Template.xlsx dist/CustomsOCR/
+          Copy-Item sample.pdf dist/CustomsOCR/
+
+      - name: Upload Portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomsOCR_Win10_Portable
+          path: dist/CustomsOCR/
+          retention-days: 30
