@@ -1,6 +1,9 @@
-name: Build Customs OCR Windows Portable
+name: Build Customs OCR v2 Windows Portable
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['app.py','engine.py','launcher.py','START_CUSTOMS_OCR.bat','requirements-build.txt','.github/workflows/main.yml','templates/**']
 jobs:
   build:
     runs-on: windows-latest
@@ -11,23 +14,43 @@ jobs:
           python-version: '3.12'
           architecture: 'x64'
       - name: Install
-        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install streamlit==1.40.2 PyMuPDF==1.24.14 openpyxl==3.1.5 pytesseract==0.3.13 Pillow==11.0.0 pyinstaller==6.11.1
-      - name: Build
+          python -m pip install -r requirements-build.txt
+      - name: Verify source and dependencies
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --console --name CustomsOCR --collect-all streamlit --copy-metadata streamlit --collect-all fitz --collect-all openpyxl --collect-all pytesseract --hidden-import PIL launcher.py
-      - name: Copy files
+          python -m py_compile app.py engine.py launcher.py
+          python -c "import streamlit, fitz, openpyxl; print('imports OK')"
+          python -c "import ast; t=ast.parse(open('app.py',encoding='utf-8').read()); assert not any(isinstance(n,ast.Import) and any(a.name in ('pandas','numpy') for a in n.names) for n in ast.walk(t))"
+      - name: Build portable app
         shell: pwsh
         run: |
-          Copy-Item app.py dist/CustomsOCR/app.py
-          Copy-Item Customs_Import_OCR_Template.xlsx dist/CustomsOCR/Customs_Import_OCR_Template.xlsx
-          if (Test-Path sample.pdf) { Copy-Item sample.pdf dist/CustomsOCR/sample.pdf }
-          if (!(Test-Path dist/CustomsOCR/CustomsOCR.exe)) { throw 'Missing EXE' }
+          python -m PyInstaller --noconfirm --clean --onedir --console --name CustomsOCR --collect-all streamlit --copy-metadata streamlit --collect-all fitz --collect-all openpyxl --collect-submodules altair launcher.py
+          Copy-Item app.py dist/CustomsOCR/
+          Copy-Item engine.py dist/CustomsOCR/
+          Copy-Item templates dist/CustomsOCR/templates -Recurse -Force
+          if (Test-Path sample.pdf) { Copy-Item sample.pdf dist/CustomsOCR/ }
+          if (!(Test-Path dist/CustomsOCR/CustomsOCR.exe)) { throw 'EXE missing' }
+          if (!(Test-Path dist/CustomsOCR/app.py)) { throw 'app.py missing' }
+          if (!(Test-Path dist/CustomsOCR/engine.py)) { throw 'engine.py missing' }
+          Copy-Item START_CUSTOMS_OCR.bat dist/CustomsOCR/
+          Write-Host 'CustomsOCR v2.0 launcher fix build' 
+      - name: Smoke test launcher
+        shell: pwsh
+        run: |
+          $p=Start-Process -FilePath (Resolve-Path 'dist/CustomsOCR/CustomsOCR.exe') -PassThru -RedirectStandardOutput 'stdout.log' -RedirectStandardError 'stderr.log'
+          try {
+            $ready=$false
+            for($i=0;$i -lt 30;$i++) {
+              Start-Sleep -Seconds 2
+              try { $r=Invoke-WebRequest 'http://127.0.0.1:8501/_stcore/health' -TimeoutSec 2 -UseBasicParsing; if($r.StatusCode -eq 200){$ready=$true;break} } catch {}
+              if($p.HasExited){break}
+            }
+            if(!$ready){Get-Content stderr.log -ErrorAction SilentlyContinue;throw 'Streamlit health check failed'}
+          } finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
       - uses: actions/upload-artifact@v4
         with:
-          name: CustomsOCR_Win10_Portable_Fix
+          name: CustomsOCR_v2_LauncherFixed_Win10_Portable
           path: dist/CustomsOCR/
           retention-days: 30
