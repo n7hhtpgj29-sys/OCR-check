@@ -1,160 +1,97 @@
-import io
-import os
-import re
-import hashlib
+import io,os,json,hashlib
 from pathlib import Path
-
 import fitz
 import streamlit as st
-from openpyxl import load_workbook
+from openpyxl import Workbook
+from engine import extract,load_profiles,FIELDS,NUMERIC
 
-HEAD = ['Source_File','Declaration_No','Invoice_No','Master_BL','House_BL','Vessel_Name','Import_Date','Loading_Country_Code','Goods_Description','Total_CIF_USD','Import_Duty_THB','Gross_Weight_KGM','Review_Status']
-DETAIL = ['Source_File','Declaration_No','Item_No','Goods_Description','Review_Status']
-NUMS = {'Total_CIF_USD','Import_Duty_THB','Gross_Weight_KGM'}
-LABELS = {'Source_File':'Source PDF','Declaration_No':'Declaration No.','Invoice_No':'Invoice No.','Master_BL':'Master B/L','House_BL':'House B/L','Vessel_Name':'Vessel Name','Import_Date':'Import Date','Loading_Country_Code':'Loading Country Code','Goods_Description':'Goods Description','Total_CIF_USD':'Total CIF (USD)','Import_Duty_THB':'Import Duty (THB)','Gross_Weight_KGM':'Gross Weight (KGM)'}
+BASE=Path(os.environ.get('CUSTOMS_OCR_BASE',Path(__file__).resolve().parent))
+PROFILES=BASE/'templates'
+PROFILES.mkdir(exist_ok=True)
+st.set_page_config(page_title='Customs OCR v2.0',layout='wide',page_icon='📄')
+st.title('Customs OCR v2.0 · Multi-Forwarder')
+st.caption('Local PDF extraction · Forwarder/Template matching · Last-page summary · Manual approval · Excel')
 
-def match(pattern, text, flags=re.I):
-    m = re.search(pattern, text, flags)
-    return m.group(1).strip() if m else ''
+def export_excel(rows,logs):
+    wb=Workbook();ws=wb.active;ws.title='Upload_Data'
+    cols=['Source_File','Forwarder','Template_ID','Pages']+FIELDS+['Review_Status']
+    ws.append(cols)
+    for row in rows:ws.append([row.get(k,'') for k in cols])
+    log=wb.create_sheet('Validation_Log');log.append(['Source_File','Field','Issue','Page'])
+    for x in logs:log.append([x.get(k,'') for k in ['Source_File','Field','Issue','Page']])
+    from openpyxl.styles import Font,PatternFill
+    for sheet in wb:
+        sheet.freeze_panes='A2';sheet.auto_filter.ref=sheet.dimensions
+        for c in sheet[1]:c.font=Font(bold=True,color='FFFFFF');c.fill=PatternFill('solid',fgColor='174A70')
+        for col in sheet.columns:
+            letter=col[0].column_letter;sheet.column_dimensions[letter].width=min(55,max(18,max(len(str(c.value or '')) for c in list(col)[:100])+2))
+    out=io.BytesIO();wb.save(out);return out.getvalue()
 
-def extract_lines(page):
-    return [line.strip() for line in page.get_text(sort=True).splitlines() if line.strip()]
+profiles=load_profiles(PROFILES)
+with st.sidebar:
+    st.header('Template Management')
+    st.write(f'Active templates: {len(profiles)}')
+    for p in profiles:st.caption(f"{p.get('forwarder')} / {p.get('template_id')} / {p.get('version','1')}")
+    new=st.file_uploader('Import template JSON',type=['json'],key='profile')
+    if new and st.button('Save template'):
+        try:
+            obj=json.loads(new.getvalue());tid=obj['template_id']
+            if not tid.replace('-','').replace('_','').isalnum():raise ValueError('Invalid template ID')
+            if not obj.get('forwarder_aliases'):raise ValueError('Forwarder aliases required')
+            dest=PROFILES/(tid+'.json')
+            if dest.exists():st.warning('Existing template: rename template_id to create a new version')
+            else:dest.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');st.success('Saved; refresh page to activate')
+        except Exception as e:st.error(str(e))
+    st.download_button('Download example profile',json.dumps({'template_id':'FORWARDER-A-v1','version':'1','forwarder':'Forwarder A','forwarder_aliases':['FORWARDER A CO., LTD.'],'layout_anchors':['เลขที่ใบขนฯ'],'active':True,'rules':{'Invoice_No':{'labels':['Invoice No.'],'pattern':r'([A-Z0-9/-]+)','scope':'first'}}},indent=2,ensure_ascii=False),'example_profile.json','application/json')
 
-def parse_pdf(data, name):
-    with fitz.open(stream=data, filetype='pdf') as doc:
-        lines = [line for page in doc for line in extract_lines(page)]
-        text = '\n'.join(lines)
-        if len(re.sub(r'\s','',text)) < 80:
-            try:
-                import pytesseract
-                from PIL import Image
-                if os.environ.get('TESSERACT_CMD'):
-                    pytesseract.pytesseract.tesseract_cmd = os.environ['TESSERACT_CMD']
-                lines=[]
-                for page in doc:
-                    pix=page.get_pixmap(matrix=fitz.Matrix(2,2))
-                    img=Image.open(io.BytesIO(pix.tobytes('png')))
-                    lines.extend([x.strip() for x in pytesseract.image_to_string(img,lang='eng+tha').splitlines() if x.strip()])
-                text='\n'.join(lines)
-            except Exception as exc:
-                raise ValueError('PDF เป็นภาพสแกน และ OCR Engine ยังไม่พร้อม: '+str(exc)) from exc
-    row = {key:'' for key in HEAD}
-    row['Source_File'] = name
-    row['Declaration_No'] = match(r'เลขที่ใบขนฯ\s*([A-Z0-9]+)',text)
-    row['Invoice_No'] = match(r'\b([A-Z0-9-]+\s*,\s*[A-Z0-9-]+)\b',text)
-    row['Import_Date'] = match(r'\b(\d{4}-\d{2}-\d{2})\b',text)
-    row['Loading_Country_Code'] = match(r'ประเทศต้นทางที่บรรทุก[\s\S]{0,100}?\b([A-Z]{2})\b',text)
-    if not row['Loading_Country_Code']:
-        row['Loading_Country_Code'] = match(r'\bJAPAN\s+(JP)\b',text)
-    row['Total_CIF_USD'] = match(r'รวม\s+USD\s*([\d,]+\.\d{2})',text)
-    row['Import_Duty_THB'] = match(r'รวม\s+USD\s*[\d,]+\.\d{2}\s+([\d,]+\.\d{2})',text)
-    row['Gross_Weight_KGM'] = match(r'GW\.?\s*=\s*([\d,]+(?:\.\d+)?)\s*KGM',text)
-    # Labels in sample are often positioned separately from values. Avoid inventing values.
-    bl_index = next((i for i,s in enumerate(lines) if 'ใบตราส่งเลขที่' in s),-1)
-    if bl_index >= 0:
-        candidates = [x for x in lines[bl_index+1:bl_index+8] if re.fullmatch(r'[A-Z0-9][A-Z0-9/\-]{3,}',x)]
-        if candidates: row['Master_BL'] = candidates[0]
-        if len(candidates)>1: row['House_BL'] = candidates[1]
-    vessel_index = next((i for i,s in enumerate(lines) if 'ชื่อยานพาหนะ' in s),-1)
-    if vessel_index >= 0:
-        candidates = [x for x in lines[vessel_index+1:vessel_index+7] if re.fullmatch(r'[A-Z][A-Z0-9 /\-]{3,}',x) and not re.fullmatch(r'\d{4}-\d{2}-\d{2}',x)]
-        if candidates: row['Vessel_Name'] = candidates[0]
-    descriptions = re.findall(r'ACCESSORIES FOR SWITCHGEAR,\s*MCC AND SUS SYSTEM',text,re.I)
-    # Example-layout fallback only; unknown descriptions must be reviewed manually.
-    row['Goods_Description'] = descriptions[0].strip() if descriptions else ''
-    for key in NUMS:
-        if row[key]:
-            try: row[key] = float(row[key].replace(',',''))
-            except ValueError: row[key] = ''
-    row['Review_Status']='Review required'
-    items = [dict(Source_File=name,Declaration_No=row['Declaration_No'],Item_No=i+1,Goods_Description=s.strip(),Review_Status='Review required') for i,s in enumerate(descriptions)]
-    issues = [(name,k,'','Missing / review required') for k in HEAD[1:-1] if row[k] == '']
-    if not items: issues.append((name,'Item_Detail','','No items automatically identified'))
-    return row,items,issues
-
-def export_excel(rows,details,issues):
-    base=Path(os.environ.get('CUSTOMS_OCR_BASE',Path(__file__).resolve().parent))
-    template=base/'Customs_Import_OCR_Template.xlsx'
-    if not template.exists():
-        raise FileNotFoundError('Excel Template not found: '+str(template))
-    wb=load_workbook(template)
-    sets=[('Upload_Data',HEAD,rows),('Item_Detail',DETAIL,details)]
-    for sheet,headers,records in sets:
-        ws=wb[sheet]
-        if ws.max_row>1: ws.delete_rows(2,ws.max_row-1)
-        for record in records: ws.append([record.get(h,'') for h in headers])
-    ws=wb['Validation_Log']
-    if ws.max_row>1: ws.delete_rows(2,ws.max_row-1)
-    for issue in issues: ws.append([*issue,'','Pending'])
-    output=io.BytesIO(); wb.save(output)
-    return output.getvalue()
-
-st.set_page_config(page_title='Customs Import OCR',page_icon='📄',layout='wide')
-st.title('Customs Import OCR · v1.1')
-st.caption('PDF → ตรวจสอบข้อมูล → Excel | Offline · No pandas')
-files=st.file_uploader('เลือกใบขนสินค้า PDF (หลายไฟล์)',type=['pdf'],accept_multiple_files=True)
+files=st.file_uploader('Upload Import Declaration PDFs',type=['pdf'],accept_multiple_files=True)
 if files:
-    signature=tuple((f.name,len(f.getvalue()),hashlib.sha256(f.getvalue()).hexdigest()) for f in files)
-    if st.session_state.get('signature') != signature:
-        st.session_state['signature']=signature
-        st.session_state['rows']=[]
-        st.session_state['details']=[]
-        st.session_state['issues']=[]
-        st.session_state['confirmed']=False
+    signature=tuple((f.name,hashlib.sha256(f.getvalue()).hexdigest()) for f in files)
+    if st.session_state.get('signature')!=signature:
+        st.session_state.signature=signature;st.session_state.results=[];st.session_state.approved=False
         for f in files:
             try:
-                row,details,issues=parse_pdf(f.getvalue(),f.name)
-                st.session_state['rows'].append(row)
-                st.session_state['details'].extend(details)
-                st.session_state['issues'].extend(issues)
-            except Exception as exc:
-                st.session_state['issues'].append((f.name,'PDF','','Cannot process: '+str(exc)))
-    rows=st.session_state['rows']
-    st.metric('อ่านได้ (ใบขน)',len(rows))
-    st.warning('ต้องตรวจสอบข้อมูลก่อน Export: ตัวอ่านอัตโนมัติรองรับโครงสร้างใบขนตัวอย่างเป็นหลัก')
-    with st.form('review_form'):
-        updated=[]
-        for i,row in enumerate(rows):
-            with st.expander(f"ใบขน {i+1}: {row.get('Declaration_No') or row['Source_File']}",expanded=True):
-                values={}
-                for key in HEAD[:-1]:
-                    value=row.get(key,'')
-                    values[key]=st.text_input(LABELS.get(key,key),value=str(value),key=f'{i}_{key}')
-                values['Review_Status']='Approved'
-                updated.append(values)
-        submitted=st.form_submit_button('ยืนยันข้อมูลที่ตรวจสอบแล้ว')
-    if submitted:
-        st.session_state['edited_rows']=updated
-        st.session_state['confirmed']=True
-    st.subheader('รายการสินค้า (ตรวจสอบและแก้ไข)')
-    revised=[]
-    for j,item in enumerate(st.session_state['details']):
-        with st.expander(f"Item {item['Item_No']} · {item['Source_File']}"):
-            desc=st.text_input('Goods Description',value=item['Goods_Description'],key=f'detail_{j}')
-            revised.append({**item,'Goods_Description':desc,'Review_Status':'Approved'})
-    st.subheader('Validation Log')
-    for filename,field,_,reason in st.session_state['issues']:
-        st.caption(f'{filename} · {field}: {reason}')
-    if st.session_state.get('confirmed'):
-        approved=st.session_state['edited_rows']
-        seen=set(); errors=[]
-        for row in approved:
-            declaration=row.get('Declaration_No','').strip()
-            if not declaration: errors.append(f"{row['Source_File']}: Declaration No. is missing")
-            elif declaration in seen: errors.append(f'Duplicate Declaration No.: {declaration}')
-            seen.add(declaration)
-            for field in NUMS:
-                raw=row.get(field,'').replace(',','').strip()
-                try: row[field]=float(raw) if raw else ''
-                except ValueError: errors.append(f"{row['Source_File']}: Invalid number in {field}")
-        if errors:
-            for error in errors: st.error(error)
-        else:
-            st.success('ยืนยันแล้ว ตรวจสอบความถูกต้องอีกครั้งก่อน Upload เข้า System')
-            try:
-                output=export_excel(approved,revised,st.session_state['issues'])
-                st.download_button('⬇️ Export Excel',output,'Customs_Import_Export.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            except Exception as exc:
-                st.error('Export failed: '+str(exc))
-else:
-    st.info('เริ่มต้นด้วยการอัปโหลด PDF ตัวอย่าง')
+                row,proof,issues=extract(f.getvalue(),f.name,profiles)
+                st.session_state.results.append({'row':row,'proof':proof,'issues':issues,'data':f.getvalue()})
+            except Exception as e:st.session_state.results.append({'error':str(e),'name':f.name})
+    st.metric('PDFs processed',sum('row' in x for x in st.session_state.results))
+    for n,item in enumerate(st.session_state.results):
+        if 'error' in item:st.error(f"{item['name']}: {item['error']}");continue
+        row=item['row']
+        with st.expander(f"{row['Source_File']} · {row['Forwarder']} · {row['Template_ID']} · {row['Pages']} pages",expanded=True):
+            if row['Forwarder']=='Unknown':st.warning('Unknown forwarder or ambiguous layout: manual review required')
+            for field in FIELDS:
+                opts=item['proof'].get(field,[])
+                hint='; '.join(f"p{x['page']}: {x['value'][:70]}" for x in opts[:3]) or 'No matching field label'
+                row[field]=st.text_input(field,value=str(row.get(field,'')),help='Candidates: '+hint,key=f'{n}_{field}',on_change=lambda:st.session_state.update(approved=False))
+                if opts:st.caption('Source candidate(s): '+hint)
+            if item['issues']:st.warning('Validation warnings: '+str(len(item['issues'])))
+            with st.popover('Preview PDF pages'):
+                pdf=fitz.open(stream=item['data'],filetype='pdf')
+                pn=st.number_input('Page',1,len(pdf),1,key=f'page{n}')
+                pix=pdf[int(pn)-1].get_pixmap(matrix=fitz.Matrix(1.25,1.25))
+                st.image(pix.tobytes('png'))
+    issues=[{'Source_File':x['row']['Source_File'],**issue} for x in st.session_state.results if 'row' in x for issue in x['issues']]
+    if issues:
+        st.subheader('Validation Log')
+        st.table(issues)
+    st.warning('Check each field against its PDF. For CIF, Duty and KGM confirm the declaration-level TOTAL on the last page; never sum page subtotals automatically.')
+    if st.button('Approve reviewed documents'):
+        rows=[x['row'] for x in st.session_state.results if 'row' in x]
+        missing=[f"{r['Source_File']}: {key}" for r in rows for key in FIELDS if not str(r.get(key,'')).strip()]
+        dup=[r['Declaration_No'] for r in rows]
+        if not rows:st.error('No valid documents')
+        elif missing:st.error('Missing fields: '+', '.join(missing[:20]))
+        elif len(dup)!=len(set(dup)):st.error('Duplicate Declaration No.')
+        else:st.session_state.approved=True
+    if st.session_state.get('approved'):
+        rows=[]
+        for item in st.session_state.results:
+            if 'row' not in item:continue
+            row=dict(item['row']);row['Review_Status']='Approved'
+            for key in NUMERIC:
+                try:row[key]=float(str(row[key]).replace(',',''))
+                except ValueError:pass
+            rows.append(row)
+        st.download_button('Download Excel',export_excel(rows,issues),'Customs_Import_Export.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+else:st.info('Upload one or more PDF files to start.')
